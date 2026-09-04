@@ -208,6 +208,8 @@ def create_dataset(config: OmegaConf, val: bool = False):
             params['task_name'] = config.dataset.task_name
         if hasattr(config.dataset, 'max_episodes'):
             params['max_episodes'] = config.dataset.max_episodes
+        if hasattr(config.dataset, 'val_ratio'):
+            params['val_ratio'] = config.dataset.val_ratio
         if hasattr(config.dataset, 'image_aug'):
             params['image_aug'] = config.dataset.image_aug and not val
 

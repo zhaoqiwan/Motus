@@ -1,3 +1,6 @@
+# Stage 3 target-embodiment fine-tuning.
+training_mode: "finetune"
+
 # 6、7、25、37
 
 
@@ -19,6 +22,7 @@ common:
 dataset:
   type: "lerobot"
   max_episodes: null
+  val_ratio: 0.1       # Episode-level split: 900 train / 100 validation
   image_aug: false
   
   # Task selection parameters
@@ -37,7 +41,7 @@ dataset:
   params:
     # Required: LeRobotMotusDataset needs repo_id + root to locate the local dataset
     repo_id: "ABPP-XHand-Tube-Insert"
-    root: "/home/ubuntu/wanzhaoqi/autobioplus_lerobot/ABPP-XHand-Tube-Insert"
+    root: "/home/wanzhaoqi/wanzhaoqi/autobioplus_lerobot/ABPP-XHand-Tube-Insert"
 
     # Embodiment type for loading normalization statistics (e.g., "aloha_agilex_2", "ac_one")
     embodiment_type: "xhand"

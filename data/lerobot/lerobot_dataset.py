@@ -148,6 +148,7 @@ class LeRobotMotusDataset(data.Dataset):
         
         # Episode limits
         max_episodes: int = 10000,
+        val_ratio: float = 0.1,
         
         # Data augmentation
         image_aug: bool = False,
@@ -202,6 +203,9 @@ class LeRobotMotusDataset(data.Dataset):
         self.action_chunk_size = self.num_video_frames * self.video_action_freq_ratio
 
         self.max_episodes = max_episodes
+        self.val_ratio = float(val_ratio)
+        if not 0.0 <= self.val_ratio < 1.0:
+            raise ValueError(f"val_ratio must be in [0, 1), got {self.val_ratio}")
         self.image_aug = image_aug # No extra augmentation on LeRobot side for now
         self.task_mode = task_mode
         self.task_name = task_name
@@ -237,6 +241,18 @@ class LeRobotMotusDataset(data.Dataset):
             all_ep_ids = list(range(total_eps))
             rng = random.Random(0)
             rng.shuffle(all_ep_ids)
+
+            # Split at episode level to prevent frames from the same trajectory
+            # appearing in both training and validation.  The fixed seed makes
+            # the split reproducible across processes and runs.
+            val_count = int(round(total_eps * self.val_ratio))
+            if val_count > 0:
+                train_ep_ids = all_ep_ids[:-val_count]
+                val_ep_ids = all_ep_ids[-val_count:]
+            else:
+                train_ep_ids = all_ep_ids
+                val_ep_ids = []
+            all_ep_ids = val_ep_ids if val else train_ep_ids
 
             if self.max_episodes is not None and self.max_episodes > 0:
                 all_ep_ids = all_ep_ids[: min(self.max_episodes, len(all_ep_ids))]
@@ -316,14 +332,23 @@ class LeRobotMotusDataset(data.Dataset):
         else:
             features = self.lerobot_dataset._datasets[0].features
         self.has_concat = "observation.images.cam_concatenated" in features
-        self.has_three_cam = all(
-            k in features
-            for k in [
+        # Support both Motus' conventional camera names and the ABPP-XHand
+        # LeRobot names (front/left/wrist1).  Keep the resolved keys so the
+        # rest of the loader can use the same stitching path.
+        camera_name_sets = [
+            (
                 "observation.images.cam_high",
                 "observation.images.cam_left_wrist",
                 "observation.images.cam_right_wrist",
-            ]
-        )
+            ),
+            (
+                "observation.images.front",
+                "observation.images.left",
+                "observation.images.wrist1",
+            ),
+        ]
+        self.camera_keys = next((keys for keys in camera_name_sets if all(k in features for k in keys)), None)
+        self.has_three_cam = self.camera_keys is not None
         
         # Fallback single-view candidates
         self.single_view_candidates = ["observation.images.main", "observation.image", "image"]
@@ -609,9 +634,10 @@ class LeRobotMotusDataset(data.Dataset):
                 return self._resize_frame_chw(img, self.video_size)
 
             if self.has_three_cam:
-                cam_high = _to_chw_float(item_data, "observation.images.cam_high")
-                cam_left = _to_chw_float(item_data, "observation.images.cam_left_wrist")
-                cam_right = _to_chw_float(item_data, "observation.images.cam_right_wrist")
+                high_key, left_key, right_key = self.camera_keys
+                cam_high = _to_chw_float(item_data, high_key)
+                cam_left = _to_chw_float(item_data, left_key)
+                cam_right = _to_chw_float(item_data, right_key)
 
                 # Inverse of:
                 #   split_h = (H//3)*2 ; split_w = W//2
@@ -697,17 +723,18 @@ class LeRobotMotusDataset(data.Dataset):
                 dim=0,
             )
         elif self.has_three_cam:
-            frames_high = _decode_key("observation.images.cam_high")
-            frames_left = _decode_key("observation.images.cam_left_wrist")
-            frames_right = _decode_key("observation.images.cam_right_wrist")
+            high_key, left_key, right_key = self.camera_keys
+            frames_high = _decode_key(high_key)
+            frames_left = _decode_key(left_key)
+            frames_right = _decode_key(right_key)
             stitched = []
             for i in range(frames_high.shape[0]):
                 stitched.append(
                     load_concatenated_view(
                         {
-                            "observation.images.cam_high": frames_high[i],
-                            "observation.images.cam_left_wrist": frames_left[i],
-                            "observation.images.cam_right_wrist": frames_right[i],
+                        high_key: frames_high[i],
+                        left_key: frames_left[i],
+                        right_key: frames_right[i],
                         }
                     )
                 )
