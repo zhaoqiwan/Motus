@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import json
 import time
 
+import pyarrow.parquet as pq
 import numpy as np
 import torch
 import torch.utils.data as data
@@ -26,7 +27,7 @@ except Exception:  # pragma: no cover
 from utils.vlm_utils import preprocess_vlm_messages
 
 from data.utils.image_utils import resize_with_padding, tensor_to_pil
-from data.utils.norm import normalize_actions, load_normalization_stats
+from data.utils.norm import normalize_actions
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata, MultiLeRobotDataset
 from lerobot.datasets.video_utils import decode_video_frames
@@ -34,6 +35,27 @@ from lerobot.datasets.video_utils import decode_video_frames
 warnings.filterwarnings("ignore", category=FutureWarning, message=".*multichannel.*")
 
 logger = logging.getLogger(__name__)
+
+
+# Load task instructions and their 0-based task_index values from tasks.parquet.
+def load_task_prompts(dataset_root: Path) -> Dict[int, str]:
+    """Load task_index -> instruction from LeRobot v3 tasks.parquet."""
+    tasks_path = dataset_root / "meta" / "tasks.parquet"
+    table = pq.read_table(tasks_path)
+
+    prompt_column = (
+        "task"
+        if "task" in table.column_names
+        else "__index_level_0__"
+    )
+
+    task_indices = table["task_index"].to_pylist()
+    prompts = table[prompt_column].to_pylist()
+
+    return {
+        int(task_index): str(prompt)
+        for task_index, prompt in zip(task_indices, prompts)
+    }
 
 
 class LeRobotMotusDataset(data.Dataset):
@@ -270,6 +292,16 @@ class LeRobotMotusDataset(data.Dataset):
                 tmp_frame_cnt += int(self.lerobot_dataset._datasets[idx].num_frames)
                 self.frame_num_accumulated.append(tmp_frame_cnt)
 
+        # Load task_index -> instruction once for LeRobot v3 datasets.
+        # LeRobot v3 stores task instructions in meta/tasks.parquet.
+        self.task_prompts: Dict[int, str] = {}
+        self._task_embedding_cache: Dict[int, torch.Tensor] = {}
+        if self.task_mode == "single":
+            dataset_root = Path(self.lerobot_dataset.root)
+            tasks_path = dataset_root / "meta" / "tasks.parquet"
+            if tasks_path.exists():
+                self.task_prompts = load_task_prompts(dataset_root)
+
         # Episode-level embedding cache (for external t5 embedding files referenced from meta/episodes.jsonl)
         # key: global episode_index (int) ; value: torch.Tensor
         self._episode_embedding_cache: Dict[int, torch.Tensor] = {}
@@ -319,10 +351,18 @@ class LeRobotMotusDataset(data.Dataset):
                 # Use the first visual key deterministically
                 self.single_view_candidates = [sorted(any_visual)[0]]
         
-        # Load normalization statistics
-        current_dir = Path(__file__).parent.parent  # Go up to data directory
-        stat_path = current_dir / "utils" / "stat.json"
-        self.action_min, self.action_max = load_normalization_stats(str(stat_path), embodiment_type)
+        # Load state/action normalization statistics from the current LeRobot dataset.      修改归一化维度
+        stats_path = Path(self.root) / "meta" / "stats.json"
+        with stats_path.open("r", encoding="utf-8") as file:
+            stats = json.load(file)
+
+        state_stats = stats["observation.state"]
+        action_stats = stats["action"]
+
+        self.state_min = np.asarray(state_stats["min"], dtype=np.float32)
+        self.state_max = np.asarray(state_stats["max"], dtype=np.float32)
+        self.action_min = np.asarray(action_stats["min"], dtype=np.float32)
+        self.action_max = np.asarray(action_stats["max"], dtype=np.float32)
 
         logger.info(f"LeRobot dataset initialized: repo_id={self.repo_id}, root={self.root}")
         logger.info(f"Embodiment type: {embodiment_type} (for normalization statistics)")
@@ -717,14 +757,50 @@ class LeRobotMotusDataset(data.Dataset):
         else:
             action_sequence = torch.tensor(action_values, dtype=torch.float32)
         
+        # Resolve task_index once so the T5 and VLM branches use the same instruction.
+        task_index: Optional[int] = None
+        if self.task_prompts:
+            task_index_raw = item_cond.get("task_index")
+            if task_index_raw is None:
+                raise KeyError("task_index not found in LeRobot v3 sample")
+            task_index = (
+                int(task_index_raw.item())
+                if hasattr(task_index_raw, "item")
+                else int(task_index_raw)
+            )
+            if task_index not in self.task_prompts:
+                raise KeyError(f"task_index {task_index} not found in meta/tasks.parquet")
+
         # Language embedding:
-        # 1) Prefer parquet (legacy: each frame has `language_embedding`)
-        # 2) Otherwise, try meta/episodes.jsonl field `t5_embedding_path` and load external pt by episode_index
+        # 1) Prefer a frame-level embedding for legacy datasets.
+        # 2) For LeRobot v3, load the task-level cache selected by task_index.
+        # 3) Otherwise, fall back to the legacy episode-level cache.
         all_embeddings = item_cond.get("language_embedding", None)
         if all_embeddings is None:
             all_embeddings = item_cond.get("observation.feature.language_embedding", None)
 
-        if all_embeddings is None:
+        if all_embeddings is None and task_index is not None:
+            cached = self._task_embedding_cache.get(task_index)
+            if cached is None:
+                cache_path = (
+                    Path(self.lerobot_dataset.root)
+                    / self.t5_folder_name
+                    / f"task_{task_index:06d}.pt"
+                )
+                if not cache_path.exists():
+                    raise FileNotFoundError(
+                        f"T5 task embedding not found: {cache_path}"
+                    )
+
+                cached = torch.load(cache_path, map_location="cpu")
+                if not isinstance(cached, torch.Tensor):
+                    cached = torch.tensor(cached)
+
+                self._task_embedding_cache[task_index] = cached
+
+            all_embeddings = cached
+
+        elif all_embeddings is None:
             # External episode-level embedding
             ep_index_raw = item_cond.get("episode_index", None)
             if ep_index_raw is None:
@@ -786,15 +862,24 @@ class LeRobotMotusDataset(data.Dataset):
 
         vlm_tokens = None
         if self.vlm_processor:
-            # Prefer dataset-stored text; fallback to `task`
-            text_instr = item_cond.get("language_instruction", None)
-            if text_instr is None or (isinstance(text_instr, str) and len(text_instr.strip()) == 0):
-                text_instr = item_cond.get("task", "")
+            if task_index is not None:
+                # Use the same instruction that selected the task-level T5 cache.
+                text_instr = self.task_prompts[task_index]
+            else:
+                # Compatibility with legacy datasets that store text in each sample.
+                text_instr = item_cond.get("language_instruction", None)
+                if text_instr is None or (isinstance(text_instr, str) and not text_instr.strip()):
+                    text_instr = item_cond.get("task", "")
             first_frame_pil = tensor_to_pil(first_frame)
             vlm_tokens = preprocess_vlm_messages(text_instr, first_frame_pil, self.vlm_processor)
 
-        normalized_actions = normalize_actions(action_sequence, self.action_min, self.action_max)
-        normalized_initial_state = normalize_actions(initial_state.unsqueeze(0), self.action_min, self.action_max).squeeze(0)
+        # Normalize state and action with their respective dataset statistics.
+        normalized_actions = normalize_actions(
+            action_sequence, self.action_min, self.action_max
+        )
+        normalized_initial_state = normalize_actions(
+            initial_state.unsqueeze(0), self.state_min, self.state_max
+        ).squeeze(0)
 
         return {
             'first_frame': first_frame,
@@ -860,4 +945,3 @@ class LeRobotMotusDataset(data.Dataset):
                 video_indices.append(action_indices[-1])
         
         return condition_frame_idx, video_indices, action_indices
-        
