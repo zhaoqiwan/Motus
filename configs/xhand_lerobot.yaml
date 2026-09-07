@@ -41,7 +41,7 @@ dataset:
   params:
     # Required: LeRobotMotusDataset needs repo_id + root to locate the local dataset
     repo_id: "ABPP-XHand-Tube-Insert"
-    root: "/home/wanzhaoqi/wanzhaoqi/autobioplus_lerobot/ABPP-XHand-Tube-Insert"
+    root: "/mnt/shared-storage-user/wanzhaoqi/datasets/ABPP-XHand-Tube-Insert"
 
     # Embodiment type for loading normalization statistics (e.g., "aloha_agilex_2", "ac_one")
     embodiment_type: "xhand"
@@ -53,12 +53,12 @@ dataset:
 # Model configuration（directly use ac_one default WAN/VLM paths）
 model:
   wan:
-    config_path: "/share/home/bhz/pretrained_models/Wan2.2-TI2V-5B"
-    checkpoint_path: "/share/home/bhz/pretrained_models/Wan2.2-TI2V-5B"
-    vae_path: "/share/home/bhz/pretrained_models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
+    config_path: "/mnt/shared-storage-user/wanzhaoqi/pretrained_models/Wan2.2-TI2V-5B"
+    checkpoint_path: "/mnt/shared-storage-user/wanzhaoqi/pretrained_models/Wan2.2-TI2V-5B"
+    vae_path: "/mnt/shared-storage-user/wanzhaoqi/pretrained_models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
     precision: "bfloat16"
   vlm:
-    checkpoint_path: "/share/home/bhz/pretrained_models/Qwen3-VL-2B-Instruct"
+    checkpoint_path: "/mnt/shared-storage-user/wanzhaoqi/pretrained_models/Qwen3-VL-2B-Instruct"
     precision: "bfloat16"
     frozen: true
   action_expert:
@@ -93,15 +93,15 @@ model:
 # Training configuration
 training:
   # Optimization settings
-  batch_size: 8
-  max_steps: 1000000
+  batch_size: 2
+  max_steps: 30000
   learning_rate: 5.0e-5
   weight_decay: 0.01
   
   # Scheduler settings
   scheduler_type: "linear"
-  warmup_steps: 200
-  cycle_length: 1000000   # To5al cycle length for scheduler
+  warmup_steps: 1000
+  cycle_length: 225000
   f_max: 0.99           # Maximum learning rate multiplier after warmup
   f_min: 0.4            # Minimum learning rate multiplier at end
   
@@ -121,17 +121,17 @@ system:
   log_level: "INFO"
   
   # Intervals
-  log_interval: 1       # Log every N steps
-  save_interval: 5000    # Save every N steps  
-  val_interval: 500     # Validate every N steps
+  log_interval: 10
+  save_interval: 30000
+  val_interval: 1000
   
   # Hardware settings
-  num_workers: 16         # Number of dataloader workers (0 = main process only, 4-8 recommended for speed)
-  pin_memory: true       # Pin memory for faster GPU transfer
+  num_workers: 8
+  pin_memory: true
 
 # Profiler settings (for performance analysis, especially dataset loading)
 profiler:
-  enable: true          # Enable torch.profiler to track dataset loading and training performance
+  enable: false
   interval: 100          # Profiler interval (not used directly, but kept for compatibility)
   warmup_steps: 5        # Number of warmup steps before profiling starts
   active_steps: 5        # Number of active profiling steps per cycle
@@ -140,7 +140,7 @@ profiler:
 # Logging settings  
 logging:
   # Reporting - support multiple logging backends
-  report_to: "wandb"  # Options: "wandb", "tensorboard", "all", "none"
+  report_to: "wandb"
   
   # Weights & Biases settings
   wandb_project: "motus"
@@ -149,7 +149,7 @@ logging:
   tensorboard_log_dir: "tensorboard_logs"
   
   # Run naming
-  run_name: null  # Optional run name (timestamp will be appended)
+  run_name: "xhand_phase1_30k_4gpu_bs2"
   
 
 # Resume training settings
@@ -158,4 +158,4 @@ resume:
   
 # Finetune settings
 finetune:
-  checkpoint_path: null  # (directory containing mp_rank_00_model_states.pt)
+  checkpoint_path: "/mnt/shared-storage-user/wanzhaoqi/pretrained_models/Motus"

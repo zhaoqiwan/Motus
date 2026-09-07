@@ -37,6 +37,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, message=".*multichanne
 logger = logging.getLogger(__name__)
 
 
+
 # Load task instructions and their 0-based task_index values from tasks.parquet.
 def load_task_prompts(dataset_root: Path) -> Dict[int, str]:
     """Load task_index -> instruction from LeRobot v3 tasks.parquet."""
@@ -150,6 +151,7 @@ class LeRobotMotusDataset(data.Dataset):
         max_episodes: int = 10000,
         val_ratio: float = 0.1,
         
+        val: bool = False,
         # Data augmentation
         image_aug: bool = False,
         
@@ -594,22 +596,34 @@ class LeRobotMotusDataset(data.Dataset):
         episode_idx = random.randint(0, self.lerobot_dataset.num_episodes - 1)
         if self.task_mode == "multi":
             task_idx = self.episode_id_to_task_idx[episode_idx]
+
             if task_idx > 0:
-                episode_idx = episode_idx - self.episode_num_accumulated[task_idx - 1]
-            from_idx_t = self.lerobot_dataset._datasets[task_idx].episode_data_index["from"][episode_idx]
-            to_idx_t = self.lerobot_dataset._datasets[task_idx].episode_data_index["to"][episode_idx]
+                episode_idx = (
+                    episode_idx
+                    - self.episode_num_accumulated[task_idx - 1]
+                )
+
+            ds_index = self.lerobot_dataset._datasets[task_idx]
+            episode_id = int(ds_index.episodes[episode_idx])
+            episode_meta = ds_index.meta.episodes[episode_id]
+
+            from_idx = int(episode_meta["dataset_from_index"])
+            to_idx = int(episode_meta["dataset_to_index"])
+
+            if task_idx > 0:
+                offset = int(self.frame_num_accumulated[task_idx - 1])
+                from_idx += offset
+                to_idx += offset
         else:
-            from_idx_t = self.lerobot_dataset.episode_data_index["from"][episode_idx]
-            to_idx_t = self.lerobot_dataset.episode_data_index["to"][episode_idx]
-        
-        from_idx = int(from_idx_t.item()) if hasattr(from_idx_t, "item") else int(from_idx_t)
-        to_idx = int(to_idx_t.item()) if hasattr(to_idx_t, "item") else int(to_idx_t)
+            episode_id = int(self.lerobot_dataset.episodes[episode_idx])
+            episode_meta = self.lerobot_dataset.meta.episodes[episode_id]
+
+            from_idx = int(episode_meta["dataset_from_index"])
+            to_idx = int(episode_meta["dataset_to_index"])
+
         total_frames = int(to_idx - from_idx)
 
         condition_frame_idx, video_indices, action_indices = self._calculate_sampling_indices(total_frames)
-
-        if self.task_mode == "multi" and task_idx > 0:
-            from_idx += self.frame_num_accumulated[task_idx - 1]
 
         global_cond_idx = int(from_idx + condition_frame_idx) 
         global_video_indices = [int(from_idx + i) for i in video_indices]
@@ -711,8 +725,32 @@ class LeRobotMotusDataset(data.Dataset):
         ep_for_video = int(ep_idx_raw.item()) if hasattr(ep_idx_raw, "item") else int(ep_idx_raw)
 
         def _decode_key(vid_key: str) -> torch.Tensor:
-            video_path = Path(ds_media.root) / ds_media.meta.get_video_file_path(ep_for_video, vid_key)
-            frames = decode_video_frames(video_path, timestamps, ds_media.tolerance_s, ds_media.video_backend).squeeze(0)
+            video_path = (
+                Path(ds_media.root)
+                / ds_media.meta.get_video_file_path(ep_for_video, vid_key)
+            )
+
+            video_meta = ds_media.meta.episodes[ep_for_video]
+            from_timestamp = float(
+                video_meta.get(
+                    f"videos/{vid_key}/from_timestamp",
+                    0.0,
+                )
+                or 0.0
+            )
+
+            shifted_timestamps = [
+                float(timestamp) + from_timestamp
+                for timestamp in timestamps
+            ]
+
+            frames = decode_video_frames(
+                video_path,
+                shifted_timestamps,
+                ds_media.tolerance_s,
+                ds_media.video_backend,
+            ).squeeze(0)
+
             return frames  # [T,C,H,W]
 
         if self.has_concat:

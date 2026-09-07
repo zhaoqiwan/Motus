@@ -5,7 +5,10 @@ import math
 from pathlib import Path
 
 import torch
-import deepspeed.comm.comm as dist
+try:
+    import deepspeed.comm.comm as dist
+except ImportError:
+    import torch.distributed as dist
 import imageio
 from safetensors import safe_open
 import numpy as np
