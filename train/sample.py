@@ -113,8 +113,13 @@ def inference_sample(model, batch: Dict, config) -> Tuple[torch.Tensor, torch.Te
         vlm_inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
                      for k, v in vlm_inputs.items()}
     
-    with torch.no_grad(): 
-        predicted_frames, predicted_actions = model.inference_step(
+    # During distributed training, ``model`` is a DistributedDataParallel
+    # wrapper.  Custom methods such as ``inference_step`` live on the wrapped
+    # Motus module, not on the DDP proxy itself.
+    inference_model = model.module if hasattr(model, "module") else model
+
+    with torch.no_grad():
+        predicted_frames, predicted_actions = inference_model.inference_step(
             first_frame=first_frame,
             state=state,
             num_inference_steps=num_inference_steps,
