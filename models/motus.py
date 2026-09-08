@@ -725,6 +725,7 @@ class Motus(nn.Module):
         if checkpoint_path.is_dir():
             # Try two possible paths
             possible_paths = [
+                checkpoint_path / "model.safetensors",
                 checkpoint_path / "pytorch_model" / "mp_rank_00_model_states.pt",
                 checkpoint_path / "mp_rank_00_model_states.pt",                   
             ]
@@ -748,8 +749,12 @@ class Motus(nn.Module):
                 raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
         logger.info(f"Loading pretrain weights from {path}")
-        checkpoint = torch.load(path, map_location='cpu')
-        state_dict = checkpoint.get('module', checkpoint)
+        if str(path).endswith(".safetensors"):
+            from safetensors.torch import load_file
+            state_dict = load_file(str(path), device="cpu")
+        else:
+            checkpoint = torch.load(path, map_location='cpu')
+            state_dict = checkpoint.get('module', checkpoint)
         
         filtered = {}
         for k, v in state_dict.items():

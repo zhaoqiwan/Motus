@@ -150,34 +150,44 @@ class UniDiffuserTrainer:
         logger.info(f"Logging backends: {report_to}")
 
     def save_checkpoint(self, suffix: str = ""):
-        """Save complete training state using accelerator."""
+        """Save model weights only to stay within shared-storage quota."""
         checkpoint_dir = self.checkpoint_dir / f"checkpoint_step_{self.global_step}{suffix}"
-        
-        # Use accelerator to save complete training state
-        # This saves model, optimizer, scheduler, dataloader, and RNG states
-        self.accelerator.save_state(str(checkpoint_dir))
-        logger.info(f"Checkpoint saved to {checkpoint_dir}")
-        # Also save a config.json alongside weights for reproducibility
-        try:
-            from omegaconf import OmegaConf as _OmegaConf
-            cfg_dict = _OmegaConf.to_container(self.config, resolve=True) if self.config is not None else {}
-            # Filter only requested sections
-            common = cfg_dict.get("common", {})
-            model = cfg_dict.get("model", {})
-            filtered = {
-                "common": common,
-                "action_expert": model.get("action_expert", {}),
-                "und_expert": model.get("und_expert", {}),
-                "time_distribution": model.get("time_distribution", {}),
-                "ema": model.get("ema", {}),
-            }
-            import json as _json
-            with open(checkpoint_dir / "config.json", "w") as f:
-                _json.dump(filtered, f, indent=2)
-            logger.info(f"Wrote config.json to {checkpoint_dir}")
-        except Exception as e:
-            logger.warning(f"Failed to write config.json: {e}")
-    
+
+        # Save only model weights; optimizer and sampler states are intentionally
+        # omitted because they exceed the shared-storage quota.
+        self.accelerator.wait_for_everyone()
+        if self.rank == 0:
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            self.accelerator.save_model(
+                unwrapped_model,
+                str(checkpoint_dir),
+                safe_serialization=True,
+                max_shard_size="2GB",
+            )
+            logger.info(f"Checkpoint saved to {checkpoint_dir}")
+
+            try:
+                from omegaconf import OmegaConf as _OmegaConf
+                cfg_dict = _OmegaConf.to_container(
+                    self.config, resolve=True
+                ) if self.config is not None else {}
+                model_cfg = cfg_dict.get("model", {})
+                filtered = {
+                    "common": cfg_dict.get("common", {}),
+                    "action_expert": model_cfg.get("action_expert", {}),
+                    "und_expert": model_cfg.get("und_expert", {}),
+                    "time_distribution": model_cfg.get("time_distribution", {}),
+                    "ema": model_cfg.get("ema", {}),
+                }
+                import json as _json
+                with open(checkpoint_dir / "config.json", "w") as f:
+                    _json.dump(filtered, f, indent=2)
+                logger.info(f"Wrote config.json to {checkpoint_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to write config.json: {e}")
+        self.accelerator.wait_for_everyone()
+
     def load_checkpoint(self, checkpoint_path: str, reset_scheduler: bool = True):
         """
         Load checkpoint and resume training.
@@ -435,6 +445,7 @@ class UniDiffuserTrainer:
         total_time = time.time() - start_time
         if self.rank == 0:
             logger.info(f"UniDiffuser training completed in {total_time:.2f}s ({self.global_step} steps)")
+        if self.global_step % self.save_interval != 0:
             self.save_checkpoint()
 
 def create_model_and_optimizer(config: OmegaConf) -> tuple:
@@ -667,22 +678,6 @@ def main():
         logger.info("Creating dataloaders...")
         train_dataloader, val_dataloader = create_dataloaders(config, rank, world_size)
         
-        # Create custom saving hook to avoid NCCL timeout issues
-        def save_model_hook(models, weights, output_dir):
-            """Custom save hook to save model safely and avoid NCCL timeouts."""
-            if accelerator.is_main_process:
-                logger.info(f"Saving model to {output_dir}")
-                for i, model_to_save in enumerate(models):
-                    # Unwrap the model if it's wrapped by DDP/DeepSpeed
-                    unwrapped_model = accelerator.unwrap_model(model_to_save)
-                    
-                    # Save using torch.save instead of accelerator's default method
-                    model_save_path = os.path.join(output_dir, f"pytorch_model_{i}.bin")
-                    torch.save(unwrapped_model.state_dict(), model_save_path)
-                    logger.info(f"Model {i} saved to {model_save_path}")
-        
-        # Register the custom save hook
-        accelerator.register_save_state_pre_hook(save_model_hook)
         
         # Prepare everything with accelerator (do not prepare val_dataloader to enable rank0-only local eval)
         logger.info("Preparing model, optimizer, and dataloaders with Accelerator...")
