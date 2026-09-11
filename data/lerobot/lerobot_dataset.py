@@ -348,6 +348,13 @@ class LeRobotMotusDataset(data.Dataset):
                 "observation.images.left",
                 "observation.images.wrist1",
             ),
+            # ABPP dual-arm Aloha: front above wrist1 (left) and wrist2 (right).
+            # Append after existing layouts to preserve XHand selection.
+            (
+                "observation.images.front",
+                "observation.images.wrist1",
+                "observation.images.wrist2",
+            ),
         ]
         self.camera_keys = next((keys for keys in camera_name_sets if all(k in features for k in keys)), None)
         self.has_three_cam = self.camera_keys is not None

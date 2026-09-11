@@ -231,3 +231,28 @@ datasets/*
 scripts_new/
 scripts/run_local.sh
 scripts/manual_multi_node_srun.sh
+# Training outputs
+checkpoints/
+outputs/
+logs/
+wandb/
+tensorboard_logs/
+
+# Model/data files
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# System
+.DS_Store

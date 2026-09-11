@@ -1,0 +1,119 @@
+# Stage 3 target-embodiment fine-tuning on ABPP-Aloha-Screw-Tighten.
+# 20 FPS; front/wrist1/wrist2 views; native 16-D state and 16-D action.
+# Keep the XHand training settings: 2 GPUs, batch size 2, 60000 steps.
+training_mode: "finetune"
+
+common:
+  action_dim: 16
+  state_dim: 16
+
+  num_video_frames: 8
+  video_height: 384
+  video_width: 320
+
+  global_downsample_rate: 1
+  video_action_freq_ratio: 4
+
+dataset:
+  type: "lerobot"
+  max_episodes: null
+  val_ratio: 0.1
+  image_aug: false
+
+  task_mode: "single"
+  task_name: "ABPP-Aloha-Screw-Tighten"
+
+  params:
+    repo_id: "ABPP-Aloha-Screw-Tighten"
+    root: "/mnt/shared-storage-user/wangyiqun/AutoBioPlus/datasets/autobioplus_lerobot/ABPP-Aloha-Screw-Tighten"
+    embodiment_type: "aloha"
+
+    # Generate t5_embedding/task_000000.pt on a GPU worker before
+    # training (see data/lerobot/add_task_t5_cache_to_lerobot_dataset.py).
+    enable_t5_fallback: false
+    t5_folder_name: "t5_embedding"
+
+model:
+  wan:
+    config_path: "/mnt/shared-storage-user/wanzhaoqi/pretrained_models/Wan2.2-TI2V-5B"
+    checkpoint_path: "/mnt/shared-storage-user/wanzhaoqi/pretrained_models/Wan2.2-TI2V-5B"
+    vae_path: "/mnt/shared-storage-user/wanzhaoqi/pretrained_models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
+    precision: "bfloat16"
+  vlm:
+    checkpoint_path: "/mnt/shared-storage-user/wanzhaoqi/pretrained_models/Qwen3-VL-2B-Instruct"
+    precision: "bfloat16"
+    frozen: true
+  action_expert:
+    hidden_size: 1024
+    ffn_dim_multiplier: 4
+    norm_eps: 1e-5
+  und_expert:
+    hidden_size: 512
+    ffn_dim_multiplier: 4
+    norm_eps: 1e-5
+    vlm:
+      input_dim: 2048
+      projector_type: "mlp3x_silu"
+  time_distribution:
+    timestep_sample_method: "logit_normal"
+    sigmoid_scale: 1.0
+    min_t: 0.0
+    max_t: 1.0
+  inference:
+    num_inference_timesteps: 10
+  loss_weights:
+    video_loss_weight: 1.0
+    action_loss_weight: 1.0
+  ema:
+    enabled: false
+    update_after_step: 0
+    inv_gamma: 1.0
+    power: 0.75
+    min_value: 0.0
+    max_value: 0.9999
+
+training:
+  batch_size: 2
+  max_steps: 60000
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+
+  scheduler_type: "linear"
+  warmup_steps: 1000
+  cycle_length: 225000
+  f_max: 0.99
+  f_min: 0.4
+
+  grad_clip_norm: 0.5
+  use_amp: true
+  find_unused_parameters: false
+
+system:
+  # Keep checkpoints on the mounted persistent storage. Paths under /home in an
+  # rjob container disappear when the job exits.
+  checkpoint_dir: "/mnt/shared-storage-user/wangyiqun/wanzhaoqi/checkpoint"
+  log_level: "INFO"
+  log_interval: 10
+  save_interval: 60000
+  val_interval: 1000
+  num_workers: 8
+  pin_memory: true
+
+profiler:
+  enable: false
+  interval: 100
+  warmup_steps: 5
+  active_steps: 5
+  repeat_steps: 1000
+
+logging:
+  report_to: "wandb"
+  wandb_project: "motus"
+  tensorboard_log_dir: "tensorboard_logs"
+  run_name: "aloha_screw_tighten_60k_2gpu_bs2_wangyiqun"
+
+resume:
+  checkpoint_path: null
+
+finetune:
+  checkpoint_path: "/mnt/shared-storage-user/wanzhaoqi/pretrained_models/Motus"
